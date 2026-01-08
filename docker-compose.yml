@@ -1,0 +1,60 @@
+services:
+  master:
+    build: .
+    command: ./master_bin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs/master:/root/logs # 收集日志到宿主机
+    networks:
+      - mdfs-net
+
+  worker1:
+    build: .
+    command: ./worker_bin -port=8081
+    environment:
+      - MASTER_URL=http://master:8080
+      - MY_ADDR=http://worker1:8081
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./data/worker1:/root/data_8081
+    depends_on:
+      - master
+    networks:
+      - mdfs-net
+
+  worker2:
+    build: .
+    command: ./worker_bin -port=8082
+    environment:
+      - MASTER_URL=http://master:8080
+      - MY_ADDR=http://worker2:8082
+
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./data/worker2:/root/data_8082
+    depends_on:
+      - master
+    networks:
+      - mdfs-net
+
+  worker3:
+    build: .
+    command: ./worker_bin -port=8083
+    environment:
+      - MASTER_URL=http://master:8080
+      - MY_ADDR=http://worker3:8083
+    ports:
+      - "8083:8083"
+    volumes:
+      - ./data/worker3:/root/data_8083
+    depends_on:
+      - master
+    networks:
+      - mdfs-net
+
+networks:
+  mdfs-net:
+    driver: bridge
