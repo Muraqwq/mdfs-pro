@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+	<html>
+	<head>
+		<meta charset="UTF-8"><title>MDFS Pro 控制台</title>
+		<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.2.3/css/bootstrap.min.css" rel="stylesheet">
+		<style>
+			body{background:#f8f9fa}
+			.card{margin-top:20px; border:none; box-shadow:0 2px 10px rgba(0,0,0,0.05)}
+			.stat-card{text-align:center; padding:15px; background:white; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+			.stat-value{font-size:2rem; font-weight:bold; color:#0d6efd}
+			.stat-label{color:#6c757d; font-size:0.9rem}
+			.checksum-display{font-family:monospace; font-size:0.75rem; color:#6c757d; background:#f1f3f5; padding:2px 6px; border-radius:4px}
+			.action-btn{padding:4px 8px; font-size:0.8rem; margin-left:4px}
+		</style>
+	</head>
+	<body class="container">
+		<div class="card"><div class="card-body">
+			<div class="d-flex justify-content-between align-items-center">
+				<div>
+					<h1>MDFS Pro 云存储</h1>
+					<p class="text-muted mb-0">分布式电影存储系统</p>
+				</div>
+				<div>
+					<button id="loginBtn" class="btn btn-outline-primary btn-sm" onclick="adminLogin()">管理登录</button>
+					<button id="logoutBtn" class="btn btn-outline-danger btn-sm" style="display:none" onclick="adminLogout()">退出</button>
+				</div>
+			</div>
+		</div></div>
+
+		<div class="row mt-3">
+			<div class="col-md-3">
+				<div class="stat-card">
+					<div class="stat-value">{{.NodeCount}}</div>
+					<div class="stat-label">活跃节点</div>
+				</div>
+			</div>
+			<div class="col-md-3">
+				<div class="stat-card">
+					<div class="stat-value">{{.FileCount}}</div>
+					<div class="stat-label">文件总数</div>
+				</div>
+			</div>
+			<div class="col-md-3">
+				<div class="stat-card">
+					<div class="stat-value" style="color:{{if gt .UnderReplicated 0}}#dc3545{{else}}#198754{{end}}">{{.UnderReplicated}}</div>
+					<div class="stat-label">副本不足</div>
+				</div>
+			</div>
+			<div class="col-md-3">
+				<div class="stat-card">
+					<div class="stat-value">{{printf "%.0f%%" .ReplicationRate}}</div>
+					<div class="stat-label">副本完整率</div>
+				</div>
+			</div>
+		</div>
+
+		<div id="adminSection" style="display:none" class="card mt-3">
+			<div class="card-body">
+				<h5>上传文件</h5>
+				<div class="input-group">
+					<input type="file" id="fileInput" class="form-control" accept=".mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v">
+					<button class="btn btn-primary" id="upBtn" onclick="upload()">分发上传</button>
+				</div>
+				<div class="progress mt-2" id="pCont" style="display:none">
+					<div id="pBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%">0%</div>
+				</div>
+				<div class="mt-2 text-muted small">
+					支持的格式：MP4, MKV, AVI, MOV, WMV, FLV, WebM, M4V
+				</div>
+				<hr>
+				<h5>集群操作</h5>
+				<button class="btn btn-outline-info btn-sm" onclick="refreshStats()">刷新状态</button>
+				<button class="btn btn-outline-warning btn-sm" onclick="verifyAll()">校验所有文件</button>
+			</div>
+		</div>
+
+		<div class="card mt-3"><div class="card-body">
+			<div class="d-flex justify-content-between align-items-center mb-3">
+				<div>
+					<h5 class="mb-0">文件列表</h5>
+					<small class="text-muted" id="fileCountLabel">共 {{.FileCount}} 个文件</small>
+				</div>
+				<div class="input-group" style="width: 300px">
+					<input type="text" id="searchInput" class="form-control form-control-sm" placeholder="搜索文件名..." oninput="handleSearch()">
+					<button class="btn btn-outline-secondary btn-sm" onclick="clearSearch()">✕</button>
+				</div>
+			</div>
+			<table class="table table-hover">
+				<thead>
+					<tr>
+						<th>文件名</th>
+						<th>校验和</th>
+						<th>副本状态</th>
+						<th>操作</th>
+					</tr>
+				</thead>
+				<tbody>
+					{{range $name, $nodes := .Files}}
+					<tr>
+						<td><strong>{{$name}}</strong></td>
+						<td><span class="checksum-display" id="checksum-{{$name}}">...</span></td>
+						<td>
+							<span class="badge {{if ge (len $nodes) 2}}bg-info{{else}}bg-warning{{end}}">{{len $nodes}}/2 副本</span>
+						</td>
+						<td>
+							{{if gt (len $nodes) 0}}
+							<button class="btn btn-sm btn-primary action-btn" onclick="playFile('{{js_escape $name}}')">播放</button>
+							<a href="/download?name={{urlquery $name}}" class="btn btn-sm btn-outline-primary action-btn">下载</a>
+							<button class="btn btn-sm btn-outline-success action-btn" onclick="verifyFile('{{js_escape $name}}')">验证</button>
+							<button class="btn btn-sm btn-outline-danger action-btn" onclick="deleteFile('{{js_escape $name}}')" style="display:none" id="delBtn-{{js_escape $name}}">删除</button>
+							{{else}}
+							<button class="btn btn-sm btn-secondary action-btn" disabled>离线</button>
+							{{end}}
+						</td>
+					</tr>
+					{{end}}
+				</tbody>
+			</table>
+		</div></div>
+
+		<div id="verifyModal" class="modal" tabindex="-1" style="display:none">
+			<div class="modal-dialog">
+				<div class="modal-content">
+					<div class="modal-header">
+						<h5 class="modal-title">校验结果</h5>
+						<button type="button" class="btn-close" onclick="closeVerifyModal()"></button>
+					</div>
+					<div class="modal-body" id="verifyResult"></div>
+					<div class="modal-footer">
+						<button type="button" class="btn btn-secondary" onclick="closeVerifyModal()">关闭</button>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div id="playModal" class="modal" tabindex="-1" style="display:none">
+			<div class="modal-dialog modal-lg">
+				<div class="modal-content">
+					<div class="modal-header">
+						<h5 class="modal-title" id="playModalTitle">播放视频</h5>
+						<button type="button" class="btn-close" onclick="closePlayModal()"></button>
+					</div>
+					<div class="modal-body">
+						<video id="videoPlayer" controls style="width:100%" class="video-fluid"></video>
+					</div>
+					<div class="modal-footer">
+						<button type="button" class="btn btn-secondary" onclick="closePlayModal()">关闭</button>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<script>
+			const token = localStorage.getItem("mdfs_token");
+			if(token === "{{.AdminKey}}"){
+				document.getElementById("adminSection").style.display="block";
+				document.getElementById("loginBtn").style.display="none";
+				document.getElementById("logoutBtn").style.display="block";
+				document.querySelectorAll('[id^="delBtn-"]').forEach(b => b.style.display="inline-block");
+			}
+			{{range $name, $nodes := .Files}}
+			fetchChecksum('{{$name}}');
+			{{end}}
+
+			function adminLogin(){ const p = prompt("密钥:"); if(p==="{{.AdminKey}}"){localStorage.setItem("mdfs_token",p); location.reload();} }
+			function adminLogout(){ localStorage.removeItem("mdfs_token"); location.reload(); }
+
+			function fetchChecksum(name){
+				fetch('/get-checksum?name=' + encodeURIComponent(name))
+					.then(r => r.text())
+					.then(data => {
+						if(data !== '404'){
+							document.getElementById('checksum-' + name).textContent = data.substring(0, 8);
+						}else{
+							document.getElementById('checksum-' + name).textContent = '---';
+						}
+					});
+			}
+
+			function upload(){
+				const file = document.getElementById('fileInput').files[0]; if(!file) return;
+				const allowedExtensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'];
+				const fileExt = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
+				if(!allowedExtensions.includes(fileExt)){
+					alert('不支持的文件格式！仅支持：MP4, MKV, AVI, MOV, WMV, FLV, WebM, M4V');
+					return;
+				}
+				const btn = document.getElementById('upBtn'); const pBar = document.getElementById('pBar');
+				document.getElementById('pCont').style.display='flex'; btn.disabled=true;
+				const fd = new FormData(); fd.append("movie", file); fd.append("secret", token);
+				const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload");
+				xhr.upload.onprogress = (e) => { const per = Math.round((e.loaded/e.total)*100); pBar.style.width=per+"%"; pBar.innerText=per+"%"; };
+				xhr.onload = () => { if(xhr.status===200){
+					alert("上传成功");
+					setTimeout(() => location.reload(), 500);
+				}else{ alert("失败: "+xhr.status); btn.disabled=false; } };
+				xhr.send(fd);
+			}
+
+			function verifyFile(name){
+				document.getElementById('verifyResult').innerHTML = '<p>正在校验 ' + name + '...</p>';
+				document.getElementById('verifyModal').style.display='block';
+				fetch('/verify?name=' + encodeURIComponent(name))
+					.then(resp => resp.json())
+					.then(data => {
+						let html = '<h6>' + name + '</h6><ul class="list-group">';
+						data.forEach(item => {
+							const status = item.valid ? 'SUCCESS' : 'FAILED';
+							const checksumDisplay = item.checksum && item.checksum !== 'UNKNOWN' ? item.checksum : 'N/A';
+							html += '<li class="list-group-item d-flex justify-content-between align-items-center">' +
+								item.node + ' <span class="badge bg-' + (item.valid ? 'success' : 'danger') + '">' + status + ' ' + checksumDisplay + '</span></li>';
+						});
+						html += '</ul>';
+						document.getElementById('verifyResult').innerHTML = html;
+					})
+					.catch(err => {
+						document.getElementById('verifyResult').innerHTML = '<p class="text-danger">请求失败: ' + err.message + '</p>';
+					});
+			}
+
+			function deleteFile(name){
+				if(!confirm("确定要删除 " + name + " 吗？此操作不可恢复！")) return;
+				fetch('/delete?name=' + encodeURIComponent(name) + '&secret=' + token)
+					.then(r => r.text())
+					.then(data => {
+						if(data.startsWith('OK:')){
+							alert('已从 ' + data.substring(3) + ' 个节点删除');
+							location.reload();
+						}else{
+							alert('删除失败: ' + data);
+						}
+					});
+			}
+
+			function refreshStats(){
+				fetch('/stats').then(r => r.json()).then(data => {
+					location.reload();
+				});
+			}
+
+			function verifyAll(){
+				const files = [
+					{{range $name, $nodes := .Files}}
+					"{{$name}}",
+					{{end}}
+				];
+				let completed = 0;
+				if(files.length === 0){
+					alert('没有文件需要校验');
+					return;
+				}
+				files.forEach(name => {
+					fetch('/verify?name=' + encodeURIComponent(name))
+						.then(resp => resp.json())
+						.then(data => {
+							completed++;
+							if(completed === files.length){
+								alert('所有文件校验完成');
+							}
+						});
+				});
+			}
+
+			function closeVerifyModal(){
+				document.getElementById('verifyModal').style.display='none';
+			}
+
+			function playFile(name){
+				document.getElementById('playModalTitle').textContent = '播放: ' + name;
+				document.getElementById('videoPlayer').src = '/play?name=' + encodeURIComponent(name);
+				document.getElementById('playModal').style.display='block';
+				document.getElementById('videoPlayer').play();
+			}
+
+			function closePlayModal(){
+				document.getElementById('videoPlayer').pause();
+				document.getElementById('videoPlayer').src = '';
+				document.getElementById('playModal').style.display='none';
+			}
+
+			let searchTimeout;
+			function handleSearch(){
+				clearTimeout(searchTimeout);
+				const query = document.getElementById('searchInput').value.trim();
+				searchTimeout = setTimeout(() => {
+					if(query === ''){
+						showAllFiles();
+					}else{
+						performSearch(query);
+					}
+				}, 300);
+			}
+
+			function clearSearch(){
+				document.getElementById('searchInput').value = '';
+				showAllFiles();
+			}
+
+			function performSearch(query){
+				fetch('/search?query=' + encodeURIComponent(query))
+					.then(resp => resp.json())
+					.then(data => {
+						renderSearchResults(data, query);
+					})
+					.catch(err => {
+						console.error('搜索失败:', err);
+					});
+			}
+
+			function renderSearchResults(files, query){
+				const tbody = document.querySelector('table tbody');
+				tbody.innerHTML = '';
+				
+				const fileNames = Object.keys(files);
+				document.getElementById('fileCountLabel').textContent = '搜索结果: ' + fileNames.length + ' 个文件';
+				
+				fileNames.forEach(name => {
+					const nodes = files[name];
+					const tr = document.createElement('tr');
+					tr.innerHTML = `
+						<td><strong>${name}</strong></td>
+						<td><span class="checksum-display" id="checksum-${name}">...</span></td>
+						<td>
+							<span class="badge ${Object.keys(nodes).length >= 2 ? 'bg-info' : 'bg-warning'}">${Object.keys(nodes).length}/2 副本</span>
+						</td>
+						<td>
+							${Object.keys(nodes).length > 0 ? `
+								<button class="btn btn-sm btn-primary action-btn" onclick="playFile('${name.replace(/'/g, "\\'")}')">播放</button>
+								<a href="/download?name=${encodeURIComponent(name)}" class="btn btn-sm btn-outline-primary action-btn">下载</a>
+								<button class="btn btn-sm btn-outline-success action-btn" onclick="verifyFile('${name.replace(/'/g, "\\'")}')">验证</button>
+								<button class="btn btn-sm btn-outline-danger action-btn" onclick="deleteFile('${name.replace(/'/g, "\\'")}')">删除</button>
+							` : '<button class="btn btn-sm btn-secondary action-btn" disabled>离线</button>'}
+						</td>
+					`;
+					tbody.appendChild(tr);
+					fetchChecksum(name);
+				});
+				
+				if(fileNames.length === 0){
+					tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">未找到匹配的文件</td></tr>';
+				}
+			}
+
+			function showAllFiles(){
+				const query = document.getElementById('searchInput').value.trim();
+				if(query === ''){
+					location.reload();
+				}
+			}
+		</script>
+	</body></html>

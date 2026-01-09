@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -17,6 +18,9 @@ import (
 	"sync"
 	"time"
 )
+
+//go:embed index.html
+var tmplHTML string
 
 const AdminSecret = "admin888"
 
@@ -126,6 +130,7 @@ func main() {
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/stats", handleStats)
 	http.HandleFunc("/metrics", handleMetrics)
+	http.HandleFunc("/search", handleSearch)
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/download", handleDownload)
@@ -379,324 +384,76 @@ mdfs_up 1
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	state.mu.RLock()
-	nodeCount := len(state.activeNodes)
-	fileCount := len(state.fileIndex)
+
+	// 计算副本不足的文件数
 	underReplicated := 0
 	for _, nodes := range state.fileIndex {
 		if len(nodes) < 2 {
 			underReplicated++
 		}
 	}
-	replicationRate := float64(100)
+
+	// 计算副本完整率
+	fileCount := len(state.fileIndex)
+	replicationRate := 0.0
 	if fileCount > 0 {
 		replicationRate = float64(fileCount-underReplicated) / float64(fileCount) * 100
 	}
+
+	data := struct {
+		Nodes           map[string]time.Time
+		Files           map[string]map[string]bool
+		AdminKey        string
+		NodeCount       int
+		FileCount       int
+		UnderReplicated int
+		ReplicationRate float64
+	}{
+		Nodes:           state.activeNodes,
+		Files:           state.fileIndex,
+		AdminKey:        AdminSecret,
+		NodeCount:       len(state.activeNodes),
+		FileCount:       fileCount,
+		UnderReplicated: underReplicated,
+		ReplicationRate: replicationRate,
+	}
 	state.mu.RUnlock()
 
-	tmpl := `<!DOCTYPE html>
-	<html>
-	<head>
-		<meta charset="UTF-8"><title>MDFS Pro 控制台</title>
-		<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.2.3/css/bootstrap.min.css" rel="stylesheet">
-		<style>
-			body{background:#f8f9fa}
-			.card{margin-top:20px; border:none; box-shadow:0 2px 10px rgba(0,0,0,0.05)}
-			.stat-card{text-align:center; padding:15px; background:white; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.08)}
-			.stat-value{font-size:2rem; font-weight:bold; color:#0d6efd}
-			.stat-label{color:#6c757d; font-size:0.9rem}
-			.checksum-display{font-family:monospace; font-size:0.75rem; color:#6c757d; background:#f1f3f5; padding:2px 6px; border-radius:4px}
-			.action-btn{padding:4px 8px; font-size:0.8rem; margin-left:4px}
-		</style>
-	</head>
-	<body class="container">
-		<div class="card"><div class="card-body">
-			<div class="d-flex justify-content-between align-items-center">
-				<div>
-					<h1>MDFS Pro 云存储</h1>
-					<p class="text-muted mb-0">分布式电影存储系统</p>
-				</div>
-				<div>
-					<button id="loginBtn" class="btn btn-outline-primary btn-sm" onclick="adminLogin()">管理登录</button>
-					<button id="logoutBtn" class="btn btn-outline-danger btn-sm" style="display:none" onclick="adminLogout()">退出</button>
-				</div>
-			</div>
-		</div></div>
+	// 绑定模板函数 (JS 转义等)
+	funcMap := template.FuncMap{
+		"js_escape": func(s string) string { return strings.ReplaceAll(s, "'", "\\'") },
+	}
 
-		<div class="row mt-3">
-			<div class="col-md-3">
-				<div class="stat-card">
-					<div class="stat-value">` + fmt.Sprintf("%d", nodeCount) + `</div>
-					<div class="stat-label">活跃节点</div>
-				</div>
-			</div>
-			<div class="col-md-3">
-				<div class="stat-card">
-					<div class="stat-value">` + fmt.Sprintf("%d", fileCount) + `</div>
-					<div class="stat-label">文件总数</div>
-				</div>
-			</div>
-			<div class="col-md-3">
-				<div class="stat-card">
-					<div class="stat-value" style="color:` + fmt.Sprintf("%s", map[bool]string{true: "#dc3545", false: "#198754"}[underReplicated > 0]) + `">` + fmt.Sprintf("%d", underReplicated) + `</div>
-					<div class="stat-label">副本不足</div>
-				</div>
-			</div>
-			<div class="col-md-3">
-				<div class="stat-card">
-					<div class="stat-value">` + fmt.Sprintf("%.0f%%", replicationRate) + `</div>
-					<div class="stat-label">副本完整率</div>
-				</div>
-			</div>
-		</div>
+	// 解析嵌入的 HTML 模板
+	tmpl, err := template.New("index").Funcs(funcMap).Parse(tmplHTML)
+	if err != nil {
+		http.Error(w, "模板加载失败: "+err.Error(), 500)
+		return
+	}
+	tmpl.Execute(w, data)
+}
 
-		<div id="adminSection" style="display:none" class="card mt-3">
-			<div class="card-body">
-				<h5>上传文件</h5>
-				<div class="input-group">
-					<input type="file" id="fileInput" class="form-control" accept=".mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v">
-					<button class="btn btn-primary" id="upBtn" onclick="upload()">分发上传</button>
-				</div>
-				<div class="progress mt-2" id="pCont" style="display:none">
-					<div id="pBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%">0%</div>
-				</div>
-				<div class="mt-2 text-muted small">
-					支持的格式：MP4, MKV, AVI, MOV, WMV, FLV, WebM, M4V
-				</div>
-				<hr>
-				<h5>集群操作</h5>
-				<button class="btn btn-outline-info btn-sm" onclick="refreshStats()">刷新状态</button>
-				<button class="btn btn-outline-warning btn-sm" onclick="verifyAll()">校验所有文件</button>
-			</div>
-		</div>
-
-		<div class="card mt-3"><div class="card-body">
-			<div class="d-flex justify-content-between align-items-center mb-3">
-				<h5 class="mb-0">文件列表</h5>
-				<small class="text-muted">共 ` + fmt.Sprintf("%d", fileCount) + ` 个文件</small>
-			</div>
-			<table class="table table-hover">
-				<thead>
-					<tr>
-						<th>文件名</th>
-						<th>校验和</th>
-						<th>副本状态</th>
-						<th>操作</th>
-					</tr>
-				</thead>
-				<tbody>
-					{{range $name, $nodes := .Files}}
-					<tr>
-						<td><strong>{{$name}}</strong></td>
-						<td><span class="checksum-display" id="checksum-{{$name}}">...</span></td>
-						<td>
-							<span class="badge {{if ge (len $nodes) 2}}bg-info{{else}}bg-warning{{end}}">{{len $nodes}}/2 副本</span>
-						</td>
-						<td>
-							{{if gt (len $nodes) 0}}
-							<button class="btn btn-sm btn-primary action-btn" onclick="playFile('{{js_escape $name}}')">播放</button>
-							<a href="/download?name={{urlquery $name}}" class="btn btn-sm btn-outline-primary action-btn">下载</a>
-							<button class="btn btn-sm btn-outline-success action-btn" onclick="verifyFile('{{js_escape $name}}')">验证</button>
-							<button class="btn btn-sm btn-outline-danger action-btn" onclick="deleteFile('{{js_escape $name}}')" style="display:none" id="delBtn-{{js_escape $name}}">删除</button>
-							{{else}}
-							<button class="btn btn-sm btn-secondary action-btn" disabled>离线</button>
-							{{end}}
-						</td>
-					</tr>
-					{{end}}
-				</tbody>
-			</table>
-		</div></div>
-
-		<div id="verifyModal" class="modal" tabindex="-1" style="display:none">
-			<div class="modal-dialog">
-				<div class="modal-content">
-					<div class="modal-header">
-						<h5 class="modal-title">校验结果</h5>
-						<button type="button" class="btn-close" onclick="closeVerifyModal()"></button>
-					</div>
-					<div class="modal-body" id="verifyResult"></div>
-					<div class="modal-footer">
-						<button type="button" class="btn btn-secondary" onclick="closeVerifyModal()">关闭</button>
-					</div>
-				</div>
-			</div>
-		</div>
-
-		<div id="playModal" class="modal" tabindex="-1" style="display:none">
-			<div class="modal-dialog modal-lg">
-				<div class="modal-content">
-					<div class="modal-header">
-						<h5 class="modal-title" id="playModalTitle">播放视频</h5>
-						<button type="button" class="btn-close" onclick="closePlayModal()"></button>
-					</div>
-					<div class="modal-body">
-						<video id="videoPlayer" controls style="width:100%" class="video-fluid"></video>
-					</div>
-					<div class="modal-footer">
-						<button type="button" class="btn btn-secondary" onclick="closePlayModal()">关闭</button>
-					</div>
-				</div>
-			</div>
-		</div>
-
-		<script>
-			const token = localStorage.getItem("mdfs_token");
-			if(token === "{{.AdminKey}}"){
-				document.getElementById("adminSection").style.display="block";
-				document.getElementById("loginBtn").style.display="none";
-				document.getElementById("logoutBtn").style.display="block";
-				document.querySelectorAll('[id^="delBtn-"]').forEach(b => b.style.display="inline-block");
-			}
-			{{range $name, $nodes := .Files}}
-			fetchChecksum('{{$name}}');
-			{{end}}
-
-			function adminLogin(){ const p = prompt("密钥:"); if(p==="{{.AdminKey}}"){localStorage.setItem("mdfs_token",p); location.reload();} }
-			function adminLogout(){ localStorage.removeItem("mdfs_token"); location.reload(); }
-
-			function fetchChecksum(name){
-				fetch('/get-checksum?name=' + encodeURIComponent(name))
-					.then(r => r.text())
-					.then(data => {
-						if(data !== '404'){
-							document.getElementById('checksum-' + name).textContent = data.substring(0, 8);
-						}else{
-							document.getElementById('checksum-' + name).textContent = '---';
-						}
-					});
-			}
-
-			function upload(){
-				const file = document.getElementById('fileInput').files[0]; if(!file) return;
-				const allowedExtensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v'];
-				const fileExt = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
-				if(!allowedExtensions.includes(fileExt)){
-					alert('不支持的文件格式！仅支持：MP4, MKV, AVI, MOV, WMV, FLV, WebM, M4V');
-					return;
-				}
-				const btn = document.getElementById('upBtn'); const pBar = document.getElementById('pBar');
-				document.getElementById('pCont').style.display='flex'; btn.disabled=true;
-				const fd = new FormData(); fd.append("movie", file); fd.append("secret", token);
-				const xhr = new XMLHttpRequest(); xhr.open("POST", "/upload");
-				xhr.upload.onprogress = (e) => { const per = Math.round((e.loaded/e.total)*100); pBar.style.width=per+"%"; pBar.innerText=per+"%"; };
-				xhr.onload = () => { if(xhr.status===200){
-					alert("上传成功");
-					setTimeout(() => location.reload(), 500);
-				}else{ alert("失败: "+xhr.status); btn.disabled=false; } };
-				xhr.send(fd);
-			}
-
-			function verifyFile(name){
-				document.getElementById('verifyResult').innerHTML = '<p>正在校验 ' + name + '...</p>';
-				document.getElementById('verifyModal').style.display='block';
-				fetch('/verify?name=' + encodeURIComponent(name))
-					.then(resp => resp.json())
-					.then(data => {
-						let html = '<h6>' + name + '</h6><ul class="list-group">';
-						data.forEach(item => {
-							const status = item.valid ? 'SUCCESS' : 'FAILED';
-							const checksumDisplay = item.checksum && item.checksum !== 'UNKNOWN' ? item.checksum : 'N/A';
-							html += '<li class="list-group-item d-flex justify-content-between align-items-center">' +
-								item.node + ' <span class="badge bg-' + (item.valid ? 'success' : 'danger') + '">' + status + ' ' + checksumDisplay + '</span></li>';
-						});
-						html += '</ul>';
-						document.getElementById('verifyResult').innerHTML = html;
-					})
-					.catch(err => {
-						document.getElementById('verifyResult').innerHTML = '<p class="text-danger">请求失败: ' + err.message + '</p>';
-					});
-			}
-
-			function deleteFile(name){
-				if(!confirm("确定要删除 " + name + " 吗？此操作不可恢复！")) return;
-				fetch('/delete?name=' + encodeURIComponent(name) + '&secret=' + token)
-					.then(r => r.text())
-					.then(data => {
-						if(data.startsWith('OK:')){
-							alert('已从 ' + data.substring(3) + ' 个节点删除');
-							location.reload();
-						}else{
-							alert('删除失败: ' + data);
-						}
-					});
-			}
-
-			function refreshStats(){
-				fetch('/stats').then(r => r.json()).then(data => {
-					location.reload();
-				});
-			}
-
-			function verifyAll(){
-				const files = [{{range $i, $name := .FileNames}}{{if gt $i 0}},{{end}}"{{$name}}"{{end}}];
-				let completed = 0;
-				if(files.length === 0){
-					alert('没有文件需要校验');
-					return;
-				}
-				files.forEach(name => {
-					fetch('/verify?name=' + encodeURIComponent(name))
-						.then(resp => resp.json())
-						.then(data => {
-							completed++;
-							if(completed === files.length){
-								alert('所有文件校验完成');
-							}
-						});
-				});
-			}
-
-			function closeVerifyModal(){
-				document.getElementById('verifyModal').style.display='none';
-			}
-
-			function playFile(name){
-				document.getElementById('playModalTitle').textContent = '播放: ' + name;
-				document.getElementById('videoPlayer').src = '/play?name=' + encodeURIComponent(name);
-				document.getElementById('playModal').style.display='block';
-				document.getElementById('videoPlayer').play();
-			}
-
-			function closePlayModal(){
-				document.getElementById('videoPlayer').pause();
-				document.getElementById('videoPlayer').src = '';
-				document.getElementById('playModal').style.display='none';
-			}
-		</script>
-	</body></html>`
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
 
 	state.mu.RLock()
-	fileNames := make([]string, 0, len(state.fileIndex))
-	for k := range state.fileIndex {
-		fileNames = append(fileNames, k)
-	}
-	state.mu.RUnlock()
+	defer state.mu.RUnlock()
 
-	funcMap := template.FuncMap{
-		"js_escape": func(s string) string {
-			s = strings.ReplaceAll(s, `\`, `\\`)
-			s = strings.ReplaceAll(s, `'`, `\'`)
-			s = strings.ReplaceAll(s, `"`, `\"`)
-			s = strings.ReplaceAll(s, "\n", `\n`)
-			s = strings.ReplaceAll(s, "\r", `\r`)
-			s = strings.ReplaceAll(s, "\t", `\t`)
-			return s
-		},
+	results := map[string]map[string]bool{}
+
+	if query == "" {
+		results = state.fileIndex
+	} else {
+		for name, nodes := range state.fileIndex {
+			if strings.Contains(strings.ToLower(name), query) {
+				results[name] = nodes
+			}
+		}
 	}
 
-	t := template.New("i").Funcs(funcMap)
-	t, _ = t.Parse(tmpl)
-	t.Execute(w, struct {
-		Nodes     map[string]time.Time
-		Files     map[string]map[string]bool
-		FileNames []string
-		AdminKey  string
-	}{
-		Nodes:     state.activeNodes,
-		Files:     state.fileIndex,
-		FileNames: fileNames,
-		AdminKey:  AdminSecret,
-	})
+	jsonData, _ := json.Marshal(results)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonData)
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
