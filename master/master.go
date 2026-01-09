@@ -615,8 +615,19 @@ func handlePlay(w http.ResponseWriter, r *http.Request) {
 
 	for node := range nodes {
 		req, _ := http.NewRequest("GET", node+"/download?name="+url.QueryEscape(name), nil)
+		// 转发 Range / If-Range 支持，保证后端返回 206 Partial Content
+		if rH := r.Header.Get("Range"); rH != "" {
+			req.Header.Set("Range", rH)
+		}
+		if ir := r.Header.Get("If-Range"); ir != "" {
+			req.Header.Set("If-Range", ir)
+		}
+
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil || resp.StatusCode >= 400 {
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
 			continue
 		}
 		defer resp.Body.Close()
